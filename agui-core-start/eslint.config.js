@@ -4,9 +4,10 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
+import eslintConfigPrettier from 'eslint-config-prettier/flat'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  globalIgnores(['**/dist/**', '**/build/**', '**/coverage/**']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [
@@ -20,7 +21,8 @@ export default defineConfig([
       globals: globals.browser,
     },
     rules: {
-      "@typescript-eslint/no-explicit-any": "off"
-    }
+      '@typescript-eslint/no-explicit-any': 'off',
+    },
   },
+  eslintConfigPrettier,
 ])

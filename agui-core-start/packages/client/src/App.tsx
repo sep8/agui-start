@@ -50,7 +50,7 @@ function eventLabel(e: AGUIEvent) {
     case EventType.ACTIVITY_SNAPSHOT:
       return `ACTIVITY_SNAPSHOT (${e.activityType ?? ''})`
     case EventType.ACTIVITY_DELTA:
-      return `ACTIVITY_DELTA (${e.activityType}) ops=${((e.patch as any[] ?? [])?.length ?? 0)}`;
+      return `ACTIVITY_DELTA (${e.activityType}) ops=${((e.patch as any[]) ?? [])?.length ?? 0}`
 
     default:
       return String(e.type)
@@ -58,12 +58,7 @@ function eventLabel(e: AGUIEvent) {
 }
 
 function isTextMessageEvent(e: AGUIEvent) {
-  return (
-    e.type === EventType.TEXT_MESSAGE_START ||
-    e.type === EventType.TEXT_MESSAGE_CONTENT ||
-    e.type === EventType.TEXT_MESSAGE_END ||
-    e.type === EventType.TEXT_MESSAGE_CHUNK
-  )
+  return e.type === EventType.TEXT_MESSAGE_START || e.type === EventType.TEXT_MESSAGE_CONTENT || e.type === EventType.TEXT_MESSAGE_END || e.type === EventType.TEXT_MESSAGE_CHUNK
 }
 
 export default function App() {
@@ -142,28 +137,18 @@ export default function App() {
         </button>
 
         <span style={{ marginLeft: 12 }}>Filter:</span>
-        <select
-          value={filter}
-          onChange={(e) => setFilter(e.target.value as Filter)}
-        >
-          <option value='lifecycle'>Lifecycle only</option>
-          <option value='messages'>Text messages only</option>
-          <option value='all'>All</option>
+        <select value={filter} onChange={(e) => setFilter(e.target.value as Filter)}>
+          <option value="lifecycle">Lifecycle only</option>
+          <option value="messages">Text messages only</option>
+          <option value="all">All</option>
         </select>
 
         <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-          <input
-            type='checkbox'
-            checked={streamEnabled}
-            onChange={(e) => setStreamEnabled(e.target.checked)}
-            disabled={connected}
-          />
+          <input type="checkbox" checked={streamEnabled} onChange={(e) => setStreamEnabled(e.target.checked)} disabled={connected} />
           Stream
         </label>
 
-        <span style={{ marginLeft: 12, opacity: 0.7 }}>
-          Status: {connected ? 'streaming...' : 'idle'}
-        </span>
+        <span style={{ marginLeft: 12, opacity: 0.7 }}>Status: {connected ? 'streaming...' : 'idle'}</span>
       </div>
 
       <div
@@ -174,9 +159,7 @@ export default function App() {
           marginTop: 16,
         }}
       >
-        <div
-          style={{ border: '1px solid #ddd', borderRadius: 12, padding: 12 }}
-        >
+        <div style={{ border: '1px solid #ddd', borderRadius: 12, padding: 12 }}>
           <div style={{ fontWeight: 600, marginBottom: 8 }}>Timeline</div>
           <ol style={{ margin: 0, paddingLeft: 18 }}>
             {shown.map((e, i) => (
@@ -187,9 +170,7 @@ export default function App() {
           </ol>
         </div>
 
-        <div
-          style={{ border: '1px solid #ddd', borderRadius: 12, padding: 12 }}
-        >
+        <div style={{ border: '1px solid #ddd', borderRadius: 12, padding: 12 }}>
           <div style={{ fontWeight: 600, marginBottom: 8 }}>Event details</div>
           <pre
             style={{
@@ -206,26 +187,13 @@ export default function App() {
           </pre>
         </div>
 
-        <div
-          style={{ border: '1px solid #ddd', borderRadius: 12, padding: 12 }}
-        >
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>
-            Rendered OPEN_JSON_UI
-          </div>
-          <div style={{ background: '#fff' }}>
-            {ui ? (
-              renderNode(ui)
-            ) : (
-              <div style={{ opacity: 0.7 }}>Waiting for ACTIVITY_SNAPSHOT…</div>
-            )}
-          </div>
+        <div style={{ border: '1px solid #ddd', borderRadius: 12, padding: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 8 }}>Rendered OPEN_JSON_UI</div>
+          <div style={{ background: '#fff' }}>{ui ? renderNode(ui) : <div style={{ opacity: 0.7 }}>Waiting for ACTIVITY_SNAPSHOT…</div>}</div>
         </div>
       </div>
 
-      <div style={{ marginTop: 16, opacity: 0.75 }}>
-        Open-JSON-UI renderer: (placeholder) — 我们下一步再接
-        ACTIVITY_SNAPSHOT/DELTA。
-      </div>
+      <div style={{ marginTop: 16, opacity: 0.75 }}>Open-JSON-UI renderer: (placeholder) — 我们下一步再接 ACTIVITY_SNAPSHOT/DELTA。</div>
     </div>
   )
 }
