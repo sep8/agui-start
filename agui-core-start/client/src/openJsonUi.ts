@@ -1,4 +1,3 @@
-// client/src/openJsonUi.ts
 export type OJNode =
   | { type: "page"; children: OJNode[] }
   | { type: "card"; title?: string; children: OJNode[] }

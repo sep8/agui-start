@@ -1,5 +1,5 @@
 {
-  "name": "agui-react",
+  "name": "@agui-start-core/client",
   "private": true,
   "version": "0.0.0",
   "type": "module",
