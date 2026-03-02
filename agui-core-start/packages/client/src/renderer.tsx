@@ -29,7 +29,18 @@ export function renderNode(node: OJNode): React.ReactNode {
       return (
         <button
           onClick={() => {
-            if (node.action?.type === 'alert') alert(node.action.message)
+            if (node.action?.type === 'custom_event') {
+              fetch('http://localhost:3001/event', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  type: 'CUSTOM',
+                  name: node.action.name,
+                  value: node.action.value,
+                  timestamp: Date.now(),
+                }),
+              })
+            }
           }}
         >
           {node.label}

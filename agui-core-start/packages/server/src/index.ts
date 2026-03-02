@@ -8,6 +8,8 @@ import type {
   RunErrorEvent,
   RunFinishedEvent,
   RunStartedEvent,
+  StateSnapshotEvent,
+  StateDeltaEvent,
   StepFinishedEvent,
   StepStartedEvent,
   TextMessageContentEvent,
@@ -18,12 +20,91 @@ import type {
   ToolCallEndEvent,
   ToolCallResultEvent,
   ToolCallStartEvent,
+  CustomEvent,
 } from '@ag-ui/core'
 
-type JSONPatchOp = { op: 'add'; path: string; value: any } | { op: 'replace'; path: string; value: any } | { op: 'remove'; path: string }
+type UiChangeValue = { kind: 'select'; id: string } | { kind: 'select_first' } | { kind: 'refetch' }
+
+const items = [
+  { id: 'doc1', title: 'AG-UI Events Concept', score: 0.92 },
+  { id: 'doc2', title: 'AG-UI JS Core Events', score: 0.87 },
+]
 
 const app = express()
 app.use(cors())
+app.use(express.json())
+
+type SSEClient = { id: string; res: express.Response }
+const clients = new Map<string, SSEClient>()
+
+type Emit = (event: BaseEvent) => void
+
+function sseHeaders(res: express.Response) {
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
+  ;(res as any).flushHeaders?.()
+}
+
+function writeEvent(res: { write: (chunk: string) => any }, event: BaseEvent) {
+  res.write(`data: ${JSON.stringify(event)}\n\n`)
+}
+
+function broadcast(event: BaseEvent) {
+  const et = (event as any)?.type ?? '(no-type)'
+  console.log('[broadcast] clients =', clients.size, 'event =', et)
+
+  for (const [id, c] of clients) {
+    try {
+      writeEvent(c.res, event)
+    } catch (e) {
+      console.log('[broadcast] drop client', id, e)
+      clients.delete(id)
+      try {
+        c.res.end()
+      } catch {
+        /* empty */
+      }
+    }
+  }
+}
+
+// --- SSE 长连接：只负责订阅事件 ---
+app.get('/agui/stream', (req, res) => {
+  sseHeaders(res)
+
+  const id = `c_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  clients.set(id, { id, res })
+  console.log('[sse] connected', id, 'clients =', clients.size)
+
+  // 立刻写点东西，避免缓冲
+  res.write(`: connected ${id}\n\n`)
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`: ping ${Date.now()}\n\n`)
+    } catch {
+      clearInterval(heartbeat)
+    }
+  }, 15000)
+
+  req.on('close', () => {
+    clearInterval(heartbeat)
+    clients.delete(id)
+    console.log('[sse] closed', id, 'clients =', clients.size)
+  })
+})
+
+app.post('/debug/broadcast', (_req, res) => {
+  broadcast({
+    type: EventType.CUSTOM,
+    name: 'debug.ping',
+    value: { t: Date.now() },
+    timestamp: Date.now(),
+  } as any)
+  res.json({ ok: true })
+})
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms))
@@ -32,42 +113,26 @@ function sleep(ms: number) {
 function splitIntoRandomChunks(text: string, min = 2, max = 6) {
   const result: string[] = []
   let i = 0
-
   while (i < text.length) {
     const size = Math.floor(Math.random() * (max - min + 1)) + min
     result.push(text.slice(i, i + size))
     i += size
   }
-
   return result
 }
 
-function sseHeaders(res: express.Response) {
-  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
-  res.setHeader('Cache-Control', 'no-cache, no-transform')
-  res.setHeader('Connection', 'keep-alive')
-  // 某些环境下能更快 flush
-  ;(res as any).flushHeaders?.()
-}
-
-function sseWrite(res: express.Response, event: BaseEvent) {
-  // 标准 SSE：每条消息一段 data: JSON + 空行
-  res.write(`data: ${JSON.stringify(event)}\n\n`)
-}
-
-// 生成一个最小 lifecycle 事件对象：携带 threadId/runId/timestamp 这些“共通”字段
 function mkEvent<T extends object>(obj: T): T & { timestamp: number } {
   return { ...obj, timestamp: Date.now() }
 }
 
 type RunMode = 'success' | 'error'
+const UI_MESSAGE_ID = 'activity:open_json_ui'
 
-async function streamLifecycle(res: express.Response, mode: RunMode, stream: boolean) {
+async function streamLifecycle(emit: Emit, mode: RunMode, stream: boolean) {
   const threadId = 'thread_demo'
   const runId = `run_${Date.now()}`
 
-  sseWrite(
-    res,
+  emit(
     mkEvent({
       type: EventType.RUN_STARTED,
       threadId,
@@ -80,8 +145,7 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
     const stepName = 'plan'
     const stepId = `${runId}:${stepName}`
 
-    sseWrite(
-      res,
+    emit(
       mkEvent({
         type: EventType.STEP_STARTED,
         threadId,
@@ -95,8 +159,7 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
 
     const messageId = `${runId}:msg:plan`
 
-    sseWrite(
-      res,
+    emit(
       mkEvent({
         type: EventType.TEXT_MESSAGE_START,
         threadId,
@@ -110,8 +173,7 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
 
     if (!stream) {
       await sleep(600)
-      sseWrite(
-        res,
+      emit(
         mkEvent({
           type: EventType.TEXT_MESSAGE_CONTENT,
           threadId,
@@ -123,11 +185,9 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
     } else {
       for (const c of chunks) {
         const pieces = splitIntoRandomChunks(c)
-
         for (const piece of pieces) {
           await sleep(40)
-          sseWrite(
-            res,
+          emit(
             mkEvent({
               type: EventType.TEXT_MESSAGE_CHUNK,
               threadId,
@@ -140,10 +200,10 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
         await sleep(80)
       }
     }
+
     await sleep(100)
 
-    sseWrite(
-      res,
+    emit(
       mkEvent({
         type: EventType.TEXT_MESSAGE_END,
         threadId,
@@ -154,8 +214,7 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
 
     await sleep(120)
 
-    sseWrite(
-      res,
+    emit(
       mkEvent({
         type: EventType.STEP_FINISHED,
         threadId,
@@ -169,14 +228,12 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
     await sleep(120)
   }
 
-  // 如果你希望 error 模式在 execute 阶段失败，这里不 return
   // ---------- STEP 2: execute (ToolCall lifecycle) ----------
   {
     const stepName = 'execute'
     const stepId = `${runId}:${stepName}`
 
-    sseWrite(
-      res,
+    emit(
       mkEvent({
         type: EventType.STEP_STARTED,
         threadId,
@@ -190,8 +247,7 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
 
     const toolCallId = `${runId}:tool:1`
 
-    sseWrite(
-      res,
+    emit(
       mkEvent({
         type: EventType.TOOL_CALL_START,
         toolCallId,
@@ -202,8 +258,7 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
     const argsChunks = ['{"query":"ag-ui lifecycle', ' + text message', ' + tool call"}']
     if (!stream) {
       await sleep(140)
-      sseWrite(
-        res,
+      emit(
         mkEvent({
           type: EventType.TOOL_CALL_ARGS,
           toolCallId,
@@ -214,11 +269,9 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
     } else {
       const fullArgs = `{"query":"ag-ui lifecycle + text message + tool call"}`
       const pieces = splitIntoRandomChunks(fullArgs)
-
       for (const piece of pieces) {
         await sleep(15)
-        sseWrite(
-          res,
+        emit(
           mkEvent({
             type: EventType.TOOL_CALL_CHUNK,
             toolCallId,
@@ -228,9 +281,9 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
         )
       }
     }
+
     await sleep(80)
-    sseWrite(
-      res,
+    emit(
       mkEvent({
         type: EventType.TOOL_CALL_END,
         toolCallId,
@@ -238,12 +291,10 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
       }) as ToolCallEndEvent,
     )
 
-    // error 模式：在工具结果处失败 + RUN_ERROR
     if (mode === 'error') {
       await sleep(150)
 
-      sseWrite(
-        res,
+      emit(
         mkEvent({
           type: EventType.TOOL_CALL_RESULT,
           toolCallId,
@@ -255,8 +306,7 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
 
       await sleep(80)
 
-      sseWrite(
-        res,
+      emit(
         mkEvent({
           type: EventType.STEP_FINISHED,
           stepName,
@@ -266,8 +316,7 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
 
       await sleep(80)
 
-      sseWrite(
-        res,
+      emit(
         mkEvent({
           type: EventType.RUN_ERROR,
           message: 'Execute step failed',
@@ -278,10 +327,8 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
       return
     }
 
-    // success 模式：返回结构化结果
     await sleep(180)
-    sseWrite(
-      res,
+    emit(
       mkEvent({
         type: EventType.TOOL_CALL_RESULT,
         toolCallId,
@@ -297,9 +344,18 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
       }) as ToolCallResultEvent,
     )
 
+    const stateSnapshot: StateSnapshotEvent = {
+      type: EventType.STATE_SNAPSHOT,
+      snapshot: {
+        phase: 'execute_done',
+        items,
+        selectedId: null,
+      },
+    }
+    emit(mkEvent(stateSnapshot))
+
     await sleep(100)
-    sseWrite(
-      res,
+    emit(
       mkEvent({
         type: EventType.STEP_FINISHED,
         stepName,
@@ -310,23 +366,20 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
     await sleep(120)
   }
 
-  // ---------- STEP 3: render (placeholder for Activity/Open-JSON-UI) ----------
+  // ---------- STEP 3: render (Activity/Open-JSON-UI) ----------
   {
     const stepName = 'render'
 
-    sseWrite(
-      res,
+    emit(
       mkEvent({
         type: EventType.STEP_STARTED,
         stepName,
       }) as StepStartedEvent,
     )
 
-    const uiMessageId = `${runId}:activity:open_json_ui`
-
     const loadingSnapshot: ActivitySnapshotEvent = {
       type: EventType.ACTIVITY_SNAPSHOT,
-      messageId: uiMessageId,
+      messageId: UI_MESSAGE_ID,
       activityType: 'OPEN_JSON_UI',
       replace: true,
       content: {
@@ -339,51 +392,48 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
           },
         ],
       },
-      timestamp: Date.now(),
     }
-
-    sseWrite(res, loadingSnapshot)
+    emit(mkEvent(loadingSnapshot))
 
     await sleep(1000)
 
     const delta: ActivityDeltaEvent = {
       type: EventType.ACTIVITY_DELTA,
-      messageId: uiMessageId,
+      messageId: UI_MESSAGE_ID,
       activityType: 'OPEN_JSON_UI',
       patch: [
-        {
-          op: 'replace',
-          path: '/children/0/children/0/value',
-          value: 'Results loaded ✅',
-        },
-        {
-          op: 'add',
-          path: '/children/0/children/1',
-          value: { type: 'text', value: '• AG-UI Events Concept (0.92)' },
-        },
-        {
-          op: 'add',
-          path: '/children/0/children/2',
-          value: { type: 'text', value: '• AG-UI JS Core Events (0.87)' },
-        },
+        { op: 'replace', path: '/children/0/children/0/value', value: 'Results loaded ✅' },
+        { op: 'add', path: '/children/0/children/1', value: { type: 'text', value: '• AG-UI Events Concept (0.92)' } },
+        { op: 'add', path: '/children/0/children/2', value: { type: 'text', value: '• AG-UI JS Core Events (0.87)' } },
         {
           op: 'add',
           path: '/children/0/children/3',
           value: {
             type: 'button',
-            label: 'Say hi',
-            action: { type: 'alert', message: 'Hello from ACTIVITY_DELTA' },
+            label: 'Select first item',
+            action: {
+              type: 'custom_event',
+              name: 'ui.change',
+              value: { kind: 'select_first' },
+            },
           },
         },
       ],
-      timestamp: Date.now(),
     }
+    emit(mkEvent(delta))
 
-    sseWrite(res, delta)
     await sleep(100)
 
-    sseWrite(
-      res,
+    // const stateDelta: StateDeltaEvent = {
+    //   type: EventType.STATE_DELTA,
+    //   delta: [
+    //     { op: 'replace', path: '/selectedId', value: 'doc1' },
+    //     { op: 'replace', path: '/phase', value: 'selected_first' },
+    //   ],
+    // }
+    // emit(mkEvent(stateDelta))
+
+    emit(
       mkEvent({
         type: EventType.STEP_FINISHED,
         stepName,
@@ -394,8 +444,7 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
 
   await sleep(100)
 
-  sseWrite(
-    res,
+  emit(
     mkEvent({
       type: EventType.RUN_FINISHED,
       threadId,
@@ -405,21 +454,74 @@ async function streamLifecycle(res: express.Response, mode: RunMode, stream: boo
   )
 }
 
-app.get('/agui/lifecycle', async (req, res) => {
-  sseHeaders(res)
-
+// ✅ 触发 run：直接广播全部事件
+app.post('/run', async (req, res) => {
   const mode = (req.query.mode === 'error' ? 'error' : 'success') as RunMode
   const stream = req.query.stream === 'true'
 
+  if (clients.size === 0) {
+    return res.status(409).json({ ok: false, error: 'No SSE clients connected. Open /agui/stream first.' })
+  }
+
   try {
-    await streamLifecycle(res, mode, stream)
-  } finally {
-    res.end()
+    await streamLifecycle(broadcast, mode, stream)
+    res.json({ ok: true })
+  } catch (e: any) {
+    console.error('[run] error', e)
+    res.status(500).json({ ok: false, error: e?.message ?? String(e) })
   }
 })
 
+// ✅ UI → Server：CUSTOM(ui.change)
+app.post('/event', (req, res) => {
+  const ev = req.body as CustomEvent
+
+  // 可选：把 client 发来的 CUSTOM 也回显到 timeline
+  if (ev?.type === EventType.CUSTOM) {
+    broadcast({ ...ev, timestamp: (ev as any).timestamp ?? Date.now() } as any)
+  }
+
+  if (ev?.type === EventType.CUSTOM && ev.name === 'ui.change') {
+    const v = ev.value as UiChangeValue | undefined
+
+    if (v?.kind === 'select_first') {
+      const delta: StateDeltaEvent = {
+        type: EventType.STATE_DELTA,
+        timestamp: Date.now(),
+        delta: [
+          { op: 'replace', path: '/selectedId', value: 'doc1' },
+          { op: 'replace', path: '/phase', value: 'selected_first_by_ui_change' },
+        ],
+      }
+      broadcast(delta)
+
+      const uiDelta: ActivityDeltaEvent = {
+        type: EventType.ACTIVITY_DELTA,
+        messageId: UI_MESSAGE_ID,
+        activityType: 'OPEN_JSON_UI',
+        patch: [{ op: 'add', path: '/children/0/children/-', value: { type: 'text', value: 'Selected: doc1' } }],
+        timestamp: Date.now(),
+      }
+      broadcast(uiDelta)
+    }
+
+    if (v?.kind === 'select') {
+      const delta: StateDeltaEvent = {
+        type: EventType.STATE_DELTA,
+        timestamp: Date.now(),
+        delta: [
+          { op: 'replace', path: '/selectedId', value: v.id },
+          { op: 'replace', path: '/phase', value: 'selected_by_ui_change' },
+        ],
+      }
+      broadcast(delta)
+    }
+  }
+
+  res.json({ ok: true })
+})
+
 app.listen(3001, () => {
-  console.log('AG-UI lifecycle SSE on http://localhost:3001/agui/lifecycle')
-  console.log('  success: http://localhost:3001/agui/lifecycle?mode=success')
-  console.log('  error:   http://localhost:3001/agui/lifecycle?mode=error')
+  console.log('AG-UI stream : http://localhost:3001/agui/stream')
+  console.log('Run (POST)  : http://localhost:3001/run?mode=success&stream=true')
 })

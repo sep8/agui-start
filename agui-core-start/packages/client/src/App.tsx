@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react'
-import { EventType, type ActivityDeltaEvent, type ActivitySnapshotEvent } from '@ag-ui/core'
+import { EventType, type ActivityDeltaEvent, type ActivitySnapshotEvent, type StateDeltaEvent, type StateSnapshotEvent } from '@ag-ui/core'
 import type { AGUIEvent } from './agui'
 import { subscribeSSE, isLifecycleEvent } from './agui'
 import type { OJNode } from './openJsonUi'
@@ -37,6 +37,7 @@ function eventLabel(e: AGUIEvent) {
       return `TEXT_MESSAGE_CONTENT "${clip((e.delta as string) ?? '')}"`
     case EventType.TEXT_MESSAGE_END:
       return `TEXT_MESSAGE_END (${e.messageId ?? ''})`
+
     case EventType.TOOL_CALL_START:
       return `TOOL_CALL_START (${e.toolCallName ?? ''})`
     case EventType.TOOL_CALL_CHUNK:
@@ -47,10 +48,19 @@ function eventLabel(e: AGUIEvent) {
       return `TOOL_CALL_END (${e.toolCallId ?? ''})`
     case EventType.TOOL_CALL_RESULT:
       return `TOOL_CALL_RESULT (${e.toolCallId ?? ''})`
+
     case EventType.ACTIVITY_SNAPSHOT:
       return `ACTIVITY_SNAPSHOT (${e.activityType ?? ''})`
     case EventType.ACTIVITY_DELTA:
-      return `ACTIVITY_DELTA (${e.activityType}) ops=${((e.patch as any[]) ?? [])?.length ?? 0}`
+      return `ACTIVITY_DELTA (${(e as any).activityType ?? ''}) ops=${(((e as any).patch as any[]) ?? [])?.length ?? 0}`
+
+    case EventType.STATE_SNAPSHOT:
+      return `STATE_SNAPSHOT`
+    case EventType.STATE_DELTA:
+      return `STATE_DELTA ops=${(e as any).delta?.length ?? 0}`
+
+    case EventType.CUSTOM:
+      return `CUSTOM (${(e as any).name ?? ''})`
 
     default:
       return String(e.type)
@@ -58,10 +68,16 @@ function eventLabel(e: AGUIEvent) {
 }
 
 function isTextMessageEvent(e: AGUIEvent) {
-  return e.type === EventType.TEXT_MESSAGE_START || e.type === EventType.TEXT_MESSAGE_CONTENT || e.type === EventType.TEXT_MESSAGE_END || e.type === EventType.TEXT_MESSAGE_CHUNK
+  return (
+    e.type === EventType.TEXT_MESSAGE_START ||
+    e.type === EventType.TEXT_MESSAGE_CONTENT ||
+    e.type === EventType.TEXT_MESSAGE_END ||
+    e.type === EventType.TEXT_MESSAGE_CHUNK
+  )
 }
 
 export default function App() {
+  const [sharedState, setSharedState] = useState<any>(null)
   const [streamEnabled, setStreamEnabled] = useState(false)
   const [events, setEvents] = useState<AGUIEvent[]>([])
   const [filter, setFilter] = useState<Filter>('lifecycle')
@@ -76,19 +92,22 @@ export default function App() {
     return events.filter(isLifecycleEvent)
   }, [events, filter])
 
-  function connect(mode: 'success' | 'error') {
+  function connect() {
     // reset + reconnect
     unsubRef.current?.()
     setEvents([])
+    setUI(null)
+    setSharedState(null)
     setConnected(true)
 
-    const url = `http://localhost:3001/agui/lifecycle?mode=${mode}&stream=${streamEnabled}`
+    const url = `http://localhost:3001/agui/stream`
     unsubRef.current = subscribeSSE(url, (e) => {
       setEvents((prev) => [...prev, e])
 
       if (e.type === EventType.ACTIVITY_SNAPSHOT) {
-        if ((e as ActivitySnapshotEvent).activityType === 'OPEN_JSON_UI') {
-          setUI(e.content as OJNode)
+        const s = e as ActivitySnapshotEvent
+        if (s.activityType === 'OPEN_JSON_UI') {
+          setUI(s.content as OJNode)
         }
       }
 
@@ -99,13 +118,28 @@ export default function App() {
         }
       }
 
-      // run end 自动断开（体验更像“一次 run”）
-      if (e.type === EventType.RUN_FINISHED || e.type === EventType.RUN_ERROR) {
-        unsubRef.current?.()
-        unsubRef.current = null
-        setConnected(false)
+      if (e.type === EventType.STATE_SNAPSHOT) {
+        const s = e as StateSnapshotEvent
+        setSharedState(s.snapshot)
       }
+
+      if (e.type === EventType.STATE_DELTA) {
+        const d = e as StateDeltaEvent
+        setSharedState((prev: any) => (prev ? applyJsonPatch(prev, d.delta ?? []) : prev))
+      }
+
+      // 注意：新架构里 SSE 是常驻的，不要在 RUN_FINISHED / RUN_ERROR 自动断开
     })
+  }
+
+  async function startRun(mode: 'success' | 'error') {
+    await fetch(`http://localhost:3001/run?mode=${mode}&stream=${streamEnabled}`, { method: 'POST' })
+  }
+
+  function clear() {
+    setEvents([])
+    setUI(null)
+    setSharedState(null)
   }
 
   function disconnect() {
@@ -116,7 +150,7 @@ export default function App() {
 
   return (
     <div style={{ padding: 16, fontFamily: 'ui-sans-serif, system-ui' }}>
-      <h2 style={{ marginTop: 0 }}>AG-UI Lifecycle Timeline (Demo)</h2>
+      <h2 style={{ marginTop: 0 }}>AG-UI Timeline (Demo)</h2>
 
       <div
         style={{
@@ -126,12 +160,21 @@ export default function App() {
           flexWrap: 'wrap',
         }}
       >
-        <button disabled={connected} onClick={() => connect('success')}>
+        <button disabled={connected} onClick={connect}>
+          Connect
+        </button>
+
+        <button disabled={!connected} onClick={() => startRun('success')}>
           Run Success
         </button>
-        <button disabled={connected} onClick={() => connect('error')}>
+        <button disabled={!connected} onClick={() => startRun('error')}>
           Run Error
         </button>
+
+        <button disabled={!connected} onClick={clear}>
+          Clear
+        </button>
+
         <button disabled={!connected} onClick={disconnect}>
           Disconnect
         </button>
@@ -144,17 +187,17 @@ export default function App() {
         </select>
 
         <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-          <input type="checkbox" checked={streamEnabled} onChange={(e) => setStreamEnabled(e.target.checked)} disabled={connected} />
+          <input type="checkbox" checked={streamEnabled} onChange={(e) => setStreamEnabled(e.target.checked)} disabled={!connected} />
           Stream
         </label>
 
-        <span style={{ marginLeft: 12, opacity: 0.7 }}>Status: {connected ? 'streaming...' : 'idle'}</span>
+        <span style={{ marginLeft: 12, opacity: 0.7 }}>Status: {connected ? 'connected' : 'idle'}</span>
       </div>
 
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: '420px 1fr 1fr',
+          gridTemplateColumns: '420px 1fr 1fr 1fr',
           gap: 16,
           marginTop: 16,
         }}
@@ -191,9 +234,28 @@ export default function App() {
           <div style={{ fontWeight: 600, marginBottom: 8 }}>Rendered OPEN_JSON_UI</div>
           <div style={{ background: '#fff' }}>{ui ? renderNode(ui) : <div style={{ opacity: 0.7 }}>Waiting for ACTIVITY_SNAPSHOT…</div>}</div>
         </div>
+
+        <div style={{ border: '1px solid #ddd', borderRadius: 12, padding: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 8 }}>State Inspector</div>
+          <pre
+            style={{
+              margin: 0,
+              background: '#f6f6f6',
+              color: '#333',
+              padding: 12,
+              borderRadius: 12,
+              maxHeight: 520,
+              overflow: 'auto',
+            }}
+          >
+            {sharedState ? JSON.stringify(sharedState, null, 2) : 'No state yet.'}
+          </pre>
+        </div>
       </div>
 
-      <div style={{ marginTop: 16, opacity: 0.75 }}>Open-JSON-UI renderer: (placeholder) — 我们下一步再接 ACTIVITY_SNAPSHOT/DELTA。</div>
+      <div style={{ marginTop: 16, opacity: 0.75 }}>
+        提示：现在是「常驻 SSE + POST /run 触发 run」模式。UI 内部的按钮会通过 POST /event 发送 CUSTOM(ui.change)，server 再广播 STATE/ACTIVITY delta。
+      </div>
     </div>
   )
 }
